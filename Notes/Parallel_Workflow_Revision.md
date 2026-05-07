@@ -21,6 +21,19 @@ LangGraph workflows use a `StateGraph` that holds a shared typed `state` (TypedD
 
 ## Example pattern
 
+```
+START
+  |
+  +---> node_a (compute strike_rate: 42) ──┐
+  |                                         | (merge deltas)
+  +---> node_b (compute boundaries: 3) ────┘
+                                      |
+                            downstream_node
+                                      |
+                                     END
+```
+
+Code example:
 ```python
 def node_a(state):
     # compute only what changed
@@ -54,3 +67,90 @@ for out in outputs:
 
 ---
 _Created to revise and remember the LangGraph parallel-workflow pattern._
+
+## Notebook-specific concepts
+
+- `parallel_workflow/simple_workflow.ipynb` — Non-LLM example:
+    - **State type:** `BatsmanState` (a `TypedDict`).
+    - **Nodes:** `calculate_strike_rate`, `calculate_boundries_per_balls`, `calculate_boundries_percent`, `generate_summary`.
+    - **Pattern:** `START` -> three metric nodes run in parallel -> `generate_summary` -> `END`.
+    - **Outputs:** nodes return partial dicts (deltas) such as `{'strike_rate': ...}` that are merged into the global state.
+    - **Purpose:** demonstrates pure-Python parallel computation, safe merging of deltas, and a final summarization node dependent on prior outputs.
+  - **State diagram:**
+    ```
+    START
+      |
+      +---> calculate_strike_rate ──┐
+      |                              |
+      +---> calculate_boundries_per_balls ──┤ (merge deltas)
+      |                              |
+      +---> calculate_boundries_percent ──┘
+                                    |
+                            generate_summary
+                                    |
+                                   END
+    ```
+  - **Example snippet (Cell 7–9):**
+    ```python
+    def calculate_strike_rate(state: BatsmanState) -> BatsmanState:
+        strike_rate = (state['runs'] / state['balls']) * 100
+        return {'strike_rate': strike_rate}  # delta only
+    
+    # Three nodes from START run in parallel, each returning a delta
+    graph.add_edge(START, "calculate_strike_rate")
+    graph.add_edge(START, "calculate_boundries_per_balls")
+    graph.add_edge(START, "calculate_boundries_percent")
+    # All merge into one state, then feed to generate_summary
+    ```
+
+- `parallel_workflow/llm_eassy_workflow.ipynb` — LLM-backed evaluation pipeline:
+    - **Model & schema:** uses `ChatGroq` with `with_structured_output(EvaluationSchema)` (a `pydantic.BaseModel`) for typed LLM responses.
+    - **State type:** `EssayState` (`TypedDict`) with `individual_score: Annotated[list[int], operator.add]` to indicate aggregation behavior.
+    - **Nodes:** `evulate_language`, `evulate_clarity`, `evulate_analysis` each call the structured LLM and return `{'..._feedback': ..., 'individual_score': [score]}`.
+    - **Aggregation:** parallel LLM evaluations produce lists of scores which are merged (via the annotated reducer) and then averaged in `final_evaluation`; `final_evaluation` also calls the LLM to produce an overall summary.
+    - **Purpose:** shows how to combine structured LLM outputs, typed schemas, and reducer-based aggregation in a parallel workflow.
+  - **State diagram:**
+    ```
+    START (essay in state)
+      |
+      +---> evulate_language ──────┐
+      |     (call LLM, score: 8)    |
+      +---> evulate_clarity ────────┤ (merge: individual_score = [8, 7, 8])
+      |     (call LLM, score: 7)    |
+      +---> evulate_analysis ───────┘
+            (call LLM, score: 8)
+                      |
+            final_evaluation
+            (avg_score = 7.67, call LLM for summary)
+                      |
+                     END
+    ```
+  - **Example snippet (Cell 10–13, 17):**
+    ```python
+    from pydantic import BaseModel, Field
+    from typing import Annotated
+    import operator
+    
+    class EvaluationSchema(BaseModel):
+        score: int = Field(..., ge=0, le=10)
+        feedback: str = Field(...)
+    
+    class EssayState(TypedDict):
+        individual_score: Annotated[list[int], operator.add]  # reducer: list addition
+    
+    def evulate_language(state: EssayState):
+        output = structured_model.invoke(prompt)
+        return {'individual_score': [output.score], 'language_feedback': output.feedback}
+    
+    # evulate_clarity, evulate_analysis run in parallel, each appending a score
+    # final_evaluation merges scores and calls LLM for overall summary
+    ```
+
+- **Shared concepts across both notebooks:**
+    - START-based parallel branching with convergence to a final node.
+    - Nodes return deltas (partial dicts) to avoid overwriting unrelated keys.
+    - Use of a typed state (TypedDict / Pydantic) to document and validate keys.
+    - Final node performs aggregation/summary after parallel branches complete.
+    - Optional: annotated reducers (like `operator.add`) for explicit aggregation semantics.
+
+---
